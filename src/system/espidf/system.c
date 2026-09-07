@@ -19,6 +19,7 @@
 #include <errno.h>
 #include <esp_heap_caps.h>
 #include <esp_random.h>
+#include <sdkconfig.h>
 #include <stddef.h>
 #include <sys/time.h>
 
@@ -46,9 +47,27 @@ uint64_t z_random_u64(void) {
 void z_random_fill(void *buf, size_t len) { esp_fill_random(buf, len); }
 
 /*------------------ Memory ------------------*/
+// When the chip has external RAM, prefer it: zenoh's session, buffers and
+// every object a consumer builds on z_malloc (rmw_zenoh_pico routes all of its
+// allocations here) then leave the small internal DRAM pool alone. The fallback
+// keeps behaviour identical on a board without PSRAM, and covers the rare
+// allocation that must be internal (none of zenoh's are touched from an ISR).
+#if defined(CONFIG_SPIRAM) && CONFIG_SPIRAM
+#define _ZP_HEAP_CAPS (MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT)
+void *z_malloc(size_t size) {
+    void *ptr = heap_caps_malloc(size, _ZP_HEAP_CAPS);
+    return (ptr != NULL) ? ptr : heap_caps_malloc(size, MALLOC_CAP_8BIT);
+}
+
+void *z_realloc(void *ptr, size_t size) {
+    void *new_ptr = heap_caps_realloc(ptr, size, _ZP_HEAP_CAPS);
+    return (new_ptr != NULL) ? new_ptr : heap_caps_realloc(ptr, size, MALLOC_CAP_8BIT);
+}
+#else
 void *z_malloc(size_t size) { return heap_caps_malloc(size, MALLOC_CAP_8BIT); }
 
 void *z_realloc(void *ptr, size_t size) { return heap_caps_realloc(ptr, size, MALLOC_CAP_8BIT); }
+#endif
 
 void z_free(void *ptr) { heap_caps_free(ptr); }
 

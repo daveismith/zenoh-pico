@@ -677,6 +677,22 @@ else()
 endif()
 
 set(CMAKE_INSTALL_CMAKEDIR "${CMAKE_INSTALL_LIBDIR}/cmake/zenohpico")
+
+# Collect the library's public compile definitions as -D flags for
+# zenohpico_DEFINITIONS in the generated package config (see PackageConfig.cmake.in).
+set(ZP_EXPORTED_DEFINITIONS "")
+if(PICO_STATIC)
+  get_target_property(_zp_export_defs zenohpico_static INTERFACE_COMPILE_DEFINITIONS)
+elseif(PICO_SHARED)
+  get_target_property(_zp_export_defs zenohpico_shared INTERFACE_COMPILE_DEFINITIONS)
+endif()
+if(_zp_export_defs)
+  foreach(_zp_def IN LISTS _zp_export_defs)
+    list(APPEND ZP_EXPORTED_DEFINITIONS "-D${_zp_def}")
+  endforeach()
+endif()
+unset(_zp_export_defs)
+
 # Generate <Package>Config.cmake
 configure_package_config_file(
   "PackageConfig.cmake.in"

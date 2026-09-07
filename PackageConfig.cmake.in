@@ -39,3 +39,17 @@ if(@BUILD_SHARED_LIBS@)
 else()
   add_library(zenohpico::lib ALIAS zenohpico::zenohpico_static)
 endif()
+
+# Plain variables for consumers that do not use imported targets. ament's
+# ament_target_dependencies() reads <pkg>_INCLUDE_DIRS, <pkg>_LIBRARIES and
+# <pkg>_DEFINITIONS, which is how rmw_zenoh_pico links against this library
+# inside a micro-ROS colcon workspace.
+set(zenohpico_INCLUDE_DIRS "@CMAKE_INSTALL_PREFIX@/@CMAKE_INSTALL_INCLUDEDIR@")
+if(@BUILD_SHARED_LIBS@)
+  set(zenohpico_LIBRARIES "@CMAKE_INSTALL_PREFIX@/@CMAKE_INSTALL_LIBDIR@/@CMAKE_SHARED_LIBRARY_PREFIX@zenohpico@CMAKE_SHARED_LIBRARY_SUFFIX@")
+else()
+  set(zenohpico_LIBRARIES "@CMAKE_INSTALL_PREFIX@/@CMAKE_INSTALL_LIBDIR@/@CMAKE_STATIC_LIBRARY_PREFIX@zenohpico@CMAKE_STATIC_LIBRARY_SUFFIX@")
+endif()
+# The platform/compiler/feature definitions the library was built with, as
+# -D flags, so a consumer's view of the headers matches the compiled objects.
+set(zenohpico_DEFINITIONS "@ZP_EXPORTED_DEFINITIONS@")
