@@ -103,6 +103,12 @@ _z_fut_fn_result_t _zp_unicast_failed_result(_z_transport_unicast_t *ztu, _z_exe
     _z_session_weak_t weak_session_clone = _z_session_weak_clone(&ztu->_common._session);
 #endif
     _z_transport_clear(&zs->_tp);
+#if Z_FEATURE_AUTO_RECONNECT == 0
+    // Without reconnection the session is dead from here on: say so, or
+    // z_session_is_closed() stays false while every send silently finds no
+    // transport. z_close() by the application still does the full cleanup.
+    _z_atomic_bool_store(&zs->_is_closed, true, _z_memory_order_release);
+#endif
     _z_session_transport_mutex_unlock(zs);
 
 #if Z_FEATURE_AUTO_RECONNECT == 1

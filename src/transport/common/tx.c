@@ -13,6 +13,7 @@
 //
 
 #include "zenoh-pico/transport/common/tx.h"
+#include "zenoh-pico/session/utils.h"
 
 #include "zenoh-pico/api/constants.h"
 #include "zenoh-pico/protocol/codec/core.h"
@@ -502,6 +503,11 @@ z_result_t _z_send_n_msg(_z_session_t *zn, const _z_network_message_t *z_msg, z_
     }
 #endif
     z_result_t ret = _Z_RES_OK;
+    // Hold the session's transport mutex (recursive) for the send: the failure
+    // handler on the executor takes it before _z_transport_clear(), so a send
+    // in flight from another thread completes first and a later one sees
+    // _Z_TRANSPORT_NONE below instead of a transport whose mutexes are gone.
+    _z_session_transport_mutex_lock(zn);
     // Call transport function
     switch (zn->_tp._type) {
         case _Z_TRANSPORT_UNICAST_TYPE: {
@@ -543,6 +549,7 @@ z_result_t _z_send_n_msg(_z_session_t *zn, const _z_network_message_t *z_msg, z_
             ret = _Z_ERR_TRANSPORT_NOT_AVAILABLE;
             break;
     }
+    _z_session_transport_mutex_unlock(zn);
     return ret;
 }
 
