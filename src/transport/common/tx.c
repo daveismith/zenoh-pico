@@ -223,6 +223,13 @@ static inline size_t _z_transport_tx_save_wpos(_z_wbuf_t *wbuf) {
 static z_result_t _z_transport_tx_send_n_msg_inner(_z_transport_common_t *ztc, const _z_network_message_t *n_msg,
                                                    z_reliability_t reliability,
                                                    _z_transport_peer_unicast_slist_t *peers) {
+    // No link: the transport lost it (peer closed, reconnect pending) and a
+    // caller on another thread is still sending. Fail the send instead of
+    // dereferencing NULL; the caller sees a transport error.
+    if (ztc->_link == NULL) {
+        _Z_INFO("Dropping network message: transport has no link");
+        return _Z_ERR_TRANSPORT_TX_FAILED;
+    }
     // Init buffer
     _z_zint_t sn = 0;
     bool batch_has_data = _z_transport_tx_batch_has_data(ztc);

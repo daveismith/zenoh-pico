@@ -84,7 +84,11 @@ typedef struct {
 static void z_task_wrapper(void *arg) {
     z_task_arg *targ = (z_task_arg *)arg;
     targ->fun(targ->arg);
-    xEventGroupSetBits(targ->join_event, 1);
+    // The argument block is this task's to free; the joiner only needs the
+    // event group, whose handle is copied out before the block goes.
+    EventGroupHandle_t join_event = targ->join_event;
+    z_free(targ);
+    xEventGroupSetBits(join_event, 1);
     vTaskDelete(NULL);
 }
 
@@ -138,6 +142,10 @@ z_result_t _z_task_init(_z_task_t *task, z_task_attr_t *arg_attr, void *(*fun)(v
 
 z_result_t _z_task_join(_z_task_t *task) {
     xEventGroupWaitBits(task->join_event, 1, pdFALSE, pdFALSE, portMAX_DELAY);
+    // Joined once; the event group (a FreeRTOS object in internal RAM) has
+    // done its job. Callers that go on to _z_task_free() find it NULL.
+    vEventGroupDelete(task->join_event);
+    task->join_event = NULL;
     return 0;
 }
 
@@ -155,7 +163,10 @@ void _z_task_exit(void) { vTaskDelete(NULL); }
 
 void _z_task_free(_z_task_t **task) {
     _z_task_t *ptr = *task;
-    z_free(ptr->join_event);
+    // An event group is a FreeRTOS object, not a z_malloc() block.
+    if (ptr->join_event != NULL) {
+        vEventGroupDelete(ptr->join_event);
+    }
     z_free(ptr);
     *task = NULL;
 }
