@@ -54,11 +54,22 @@ static void _z_tcp_esp32_endpoint_clear(_z_sys_net_endpoint_t *ep) {
 }
 
 static z_result_t _z_tcp_esp32_open(_z_sys_net_socket_t *sock, const _z_sys_net_endpoint_t endpoint, uint32_t tout) {
-    _ZP_UNUSED(tout);
     z_result_t ret = _Z_RES_OK;
 
     sock->_fd = socket(endpoint._iptcp->ai_family, endpoint._iptcp->ai_socktype, endpoint._iptcp->ai_protocol);
     if (sock->_fd != -1) {
+        // The read task polls with recv() and expects it to return after `tout` (Z_CONFIG_SOCKET_TIMEOUT)
+        // so the executor gets back to its timers. Without SO_RCVTIMEO recv() blocks until the peer sends
+        // something, the keep-alive timer only runs when the router's own keep-alives arrive, and the
+        // first client keep-alive goes out after the router's lease has already expired.
+        z_time_t tv;
+        tv.tv_sec = tout / (uint32_t)1000;
+        tv.tv_usec = (tout % (uint32_t)1000) * (uint32_t)1000;
+        if ((ret == _Z_RES_OK) && (setsockopt(sock->_fd, SOL_SOCKET, SO_RCVTIMEO, (void *)&tv, sizeof(tv)) < 0)) {
+            _Z_ERROR_LOG(_Z_ERR_GENERIC);
+            ret = _Z_ERR_GENERIC;
+        }
+
         int optflag = 1;
         if ((ret == _Z_RES_OK) &&
             (setsockopt(sock->_fd, SOL_SOCKET, SO_KEEPALIVE, (void *)&optflag, sizeof(optflag)) < 0)) {
@@ -166,6 +177,13 @@ static z_result_t _z_tcp_esp32_accept(const _z_sys_net_socket_t *sock_in, _z_sys
     }
 
     int optflag = 1;
+    // Same receive timeout as _z_tcp_esp32_open: the read task must not block in recv() indefinitely.
+    z_time_t tv;
+    tv.tv_sec = Z_CONFIG_SOCKET_TIMEOUT / (uint32_t)1000;
+    tv.tv_usec = (Z_CONFIG_SOCKET_TIMEOUT % (uint32_t)1000) * (uint32_t)1000;
+    if (setsockopt(con_socket, SOL_SOCKET, SO_RCVTIMEO, (void *)&tv, sizeof(tv)) < 0) {
+        _Z_ERROR_RETURN(_Z_ERR_GENERIC);
+    }
     if (setsockopt(con_socket, SOL_SOCKET, SO_KEEPALIVE, (void *)&optflag, sizeof(optflag)) < 0) {
         close(con_socket);
         _Z_ERROR_RETURN(_Z_ERR_GENERIC);
