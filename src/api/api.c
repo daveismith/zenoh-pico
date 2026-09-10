@@ -2527,6 +2527,33 @@ z_result_t zp_stop_read_task(z_loaned_session_t *zs) {
     return _z_runtime_stop((_z_runtime_t *)&_Z_RC_IN_VAL(zs)->_runtime);
 }
 
+z_result_t zp_session_disconnect(z_loaned_session_t *zs) {
+    _z_session_t *zn = _Z_RC_IN_VAL(zs);
+
+    // Say the session is gone before anything else, so a caller that checks
+    // z_session_is_closed() before sending gives up on its own.
+    _Z_RETURN_IF_ERR(_z_session_mutex_lock(zn));
+    _z_atomic_bool_store(&zn->_is_closed, true, _z_memory_order_release);
+    _z_session_mutex_unlock(zn);
+
+    // Stop the executor and JOIN it (see _z_background_executor_inner_stop). After
+    // this returns no subscription callback is in flight, which is what makes it
+    // safe for the caller to free the contexts those callbacks were handed -- the
+    // callback is invoked outside the session mutex, so without this there is no
+    // point at which an application can know a dispatch is not running.
+    _Z_RETURN_IF_ERR(_z_runtime_stop(&zn->_runtime));
+
+    // Drop the transport under the same mutex _z_send_n_msg takes, exactly as the
+    // unicast failure handler does on link loss. Every later send then finds
+    // _Z_TRANSPORT_NONE and returns _Z_ERR_TRANSPORT_NOT_AVAILABLE immediately,
+    // without entering the network stack.
+    _z_session_transport_mutex_lock(zn);
+    _z_transport_clear(&zn->_tp);
+    _z_session_transport_mutex_unlock(zn);
+
+    return _Z_RES_OK;
+}
+
 bool zp_read_task_is_running(const z_loaned_session_t *zs) {
     return _z_background_executor_is_running(&_Z_RC_IN_VAL(zs)->_runtime);
 }

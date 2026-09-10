@@ -266,9 +266,22 @@ _ze_advanced_subscriber_t _ze_advanced_subscriber_null(void) {
 }
 
 z_result_t _ze_advanced_subscriber_undeclare(_ze_advanced_subscriber_t *sub) {
-    if (sub == NULL || !_ze_advanced_subscriber_check(sub)) {
+    if (sub == NULL) {
         _Z_ERROR_RETURN(_Z_ERR_ENTITY_UNKNOWN);
     }
+    // Do NOT gate this on _ze_advanced_subscriber_check(): that predicate includes "the
+    // session is still alive" (via _ze_advanced_subscriber_state_check, which requires a
+    // non-null state->_zn weak reference). Once a link drops, the session weak goes null and
+    // this function used to bail out having freed NOTHING -- not the sub-subscribers, and not
+    // the state RC that owns the state mutex. Losing a link is exactly when an application
+    // tears entities down, so the common failure path leaked every time.
+    //
+    // Everything below must stay UNCONDITIONAL. z_undeclare_subscriber() attempts the network
+    // undeclare and then calls _z_subscriber_clear() whatever that returned, and it is that
+    // clear which runs the closure drop handler. The drop handlers are what release this
+    // subscriber's references to the shared state AND what satisfy the session's
+    // _callback_drop_sync_group -- so skipping one (for instance because its internal check
+    // now reads false) hangs _z_session_close() forever in _z_sync_group_wait().
     z_result_t ret = z_undeclare_subscriber(z_subscriber_move(&sub->_subscriber));
     if (sub->_has_liveliness_subscriber) {
         z_result_t ret2 = z_undeclare_subscriber(z_subscriber_move(&sub->_liveliness_subscriber));
@@ -278,16 +291,21 @@ z_result_t _ze_advanced_subscriber_undeclare(_ze_advanced_subscriber_t *sub) {
         z_result_t ret2 = z_undeclare_subscriber(z_subscriber_move(&sub->_heartbeat_subscriber));
         _Z_SET_IF_OK(ret, ret2);
     }
-    _ze_advanced_subscriber_state_rc_drop(&sub->_state);
+    if (!_Z_RC_IS_NULL(&sub->_state)) {
+        _ze_advanced_subscriber_state_rc_drop(&sub->_state);
+    }
 
     *sub = _ze_advanced_subscriber_null();
     return ret;
 }
 
 void _ze_advanced_subscriber_clear(_ze_advanced_subscriber_t *sub) {
-    if (sub == NULL || !_ze_advanced_subscriber_check(sub)) {
+    if (sub == NULL) {
         return;
     }
+    // Same reasoning as _ze_advanced_subscriber_undeclare(): a dead session must still
+    // release local memory, and every clear below stays unconditional so no drop handler
+    // is skipped.
     _z_subscriber_clear(&sub->_subscriber._val);
     if (sub->_has_liveliness_subscriber) {
         _z_subscriber_clear(&sub->_liveliness_subscriber._val);
@@ -295,7 +313,9 @@ void _ze_advanced_subscriber_clear(_ze_advanced_subscriber_t *sub) {
     if (sub->_has_heartbeat_subscriber) {
         _z_subscriber_clear(&sub->_heartbeat_subscriber._val);
     }
-    _ze_advanced_subscriber_state_rc_drop(&sub->_state);
+    if (!_Z_RC_IS_NULL(&sub->_state)) {
+        _ze_advanced_subscriber_state_rc_drop(&sub->_state);
+    }
 
     *sub = _ze_advanced_subscriber_null();
 }

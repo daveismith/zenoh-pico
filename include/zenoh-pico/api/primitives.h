@@ -3212,6 +3212,31 @@ z_result_t zp_start_read_task(z_loaned_session_t *zs, const zp_task_read_options
 z_result_t zp_stop_read_task(z_loaned_session_t *zs);
 
 /**
+ * Takes a session off the network without tearing it down, so that an application can
+ * dismantle its own entities safely and silently.
+ *
+ * Two guarantees, in this order:
+ *   - the executor is stopped and joined, so no subscription callback is in flight when
+ *     this returns. Callbacks are invoked outside the session mutex, so there is otherwise
+ *     no moment at which an application can know it is safe to free a context a callback
+ *     still holds.
+ *   - the transport is cleared under the send mutex, so every later send returns
+ *     ``_Z_ERR_TRANSPORT_NOT_AVAILABLE`` at once instead of entering the network stack.
+ *     Undeclares issued while dismantling entities become no-ops; the router discards the
+ *     declarations anyway when the session closes.
+ *
+ * The session must still be closed and dropped afterwards as usual; this only makes that
+ * teardown quiet. Idempotent.
+ *
+ * Parameters:
+ *   zs: Pointer to a :c:type:`z_loaned_session_t` to disconnect.
+ *
+ * Return:
+ *   ``0`` if successful, ``negative value`` otherwise.
+ */
+z_result_t zp_session_disconnect(z_loaned_session_t *zs);
+
+/**
  * Deprecated, if Z_FEATURE_MULTI_THREAD is enabled background tasks are now started automatically when session is
  * created.
  *
