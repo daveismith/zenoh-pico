@@ -321,7 +321,9 @@ static z_result_t _z_multicast_handle_fragment_inner(_z_transport_multicast_t *z
     if (!_Z_HAS_FLAG(header, _Z_FLAG_T_FRAGMENT_M)) {
         // Drop message if it exceeds the fragmentation size
         if (*dbuf_state == _Z_DBUF_STATE_OVERFLOW) {
-            _Z_INFO("Fragment dropped because defragmentation buffer has overflown");
+            _Z_WARN("Message dropped: it does not fit the %zu-byte defragmentation buffer "
+                    "(Z_FRAG_MAX_SIZE); %zu bytes had been buffered when it overflowed",
+                    (size_t)Z_FRAG_MAX_SIZE, _z_wbuf_len(dbuf));
             _z_wbuf_clear(dbuf);
             *dbuf_state = _Z_DBUF_STATE_NULL;
             return _Z_RES_OK;
