@@ -176,79 +176,200 @@ _z_task_id_t _z_task_current_id(void) { return xTaskGetCurrentTaskHandle(); }
 bool _z_task_id_equal(const _z_task_id_t *l, const _z_task_id_t *r) { return *l == *r; }
 
 /*------------------ Mutex ------------------*/
-z_result_t _z_mutex_init(_z_mutex_t *m) { _Z_CHECK_SYS_ERR(pthread_mutex_init(m, NULL)); }
+/*
+ * Every object comes from Z_ESPIDF_SYNC_CAPS, and from internal RAM if that fails, through
+ * the WithCaps calls in both cases so that one delete fits all of them.
+ */
+#ifndef Z_ESPIDF_SYNC_CAPS
+#if CONFIG_SPIRAM
+#define Z_ESPIDF_SYNC_CAPS (MALLOC_CAP_SPIRAM | MALLOC_CAP_8BIT)
+#else
+#define Z_ESPIDF_SYNC_CAPS (MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)
+#endif
+#endif
+#define _Z_ESPIDF_SYNC_FALLBACK_CAPS (MALLOC_CAP_INTERNAL | MALLOC_CAP_8BIT)
 
-z_result_t _z_mutex_drop(_z_mutex_t *m) { _Z_CHECK_SYS_ERR(pthread_mutex_destroy(m)); }
+static SemaphoreHandle_t _z_espidf_mutex_new(bool recursive) {
+    SemaphoreHandle_t h = recursive ? xSemaphoreCreateRecursiveMutexWithCaps(Z_ESPIDF_SYNC_CAPS)
+                                    : xSemaphoreCreateMutexWithCaps(Z_ESPIDF_SYNC_CAPS);
+    if (h == NULL) {
+        h = recursive ? xSemaphoreCreateRecursiveMutexWithCaps(_Z_ESPIDF_SYNC_FALLBACK_CAPS)
+                      : xSemaphoreCreateMutexWithCaps(_Z_ESPIDF_SYNC_FALLBACK_CAPS);
+    }
+    return h;
+}
 
-z_result_t _z_mutex_lock(_z_mutex_t *m) { _Z_CHECK_SYS_ERR(pthread_mutex_lock(m)); }
+static SemaphoreHandle_t _z_espidf_counting_new(void) {
+    SemaphoreHandle_t h = xSemaphoreCreateCountingWithCaps(UINT32_MAX, 0, Z_ESPIDF_SYNC_CAPS);
+    if (h == NULL) {
+        h = xSemaphoreCreateCountingWithCaps(UINT32_MAX, 0, _Z_ESPIDF_SYNC_FALLBACK_CAPS);
+    }
+    return h;
+}
 
-z_result_t _z_mutex_try_lock(_z_mutex_t *m) { _Z_CHECK_SYS_ERR(pthread_mutex_trylock(m)); }
+static void _z_espidf_sem_delete(SemaphoreHandle_t *h) {
+    if (*h != NULL) {
+        vSemaphoreDeleteWithCaps(*h);
+        *h = NULL;
+    }
+}
 
-z_result_t _z_mutex_unlock(_z_mutex_t *m) { _Z_CHECK_SYS_ERR(pthread_mutex_unlock(m)); }
+/*
+ * A mutex or condvar that was never initialised has a NULL handle, and FreeRTOS asserts on
+ * one. ESP-IDF's pthreads answered EINVAL instead and carried on, unlocked, and
+ * rmw_zenoh_pico had two such fields that nobody noticed for that reason. This keeps the
+ * pthread answer, log line included ("System error: 22"), so a path not yet found behaves as
+ * it did and says so, rather than taking the board down.
+ */
+#define _Z_ESPIDF_CHECK_HANDLE(h)            \
+    do {                                     \
+        if ((h) == NULL) {                   \
+            _z_report_system_error(EINVAL);  \
+            return _Z_ERR_SYSTEM_GENERIC;    \
+        }                                    \
+    } while (false)
+
+z_result_t _z_mutex_init(_z_mutex_t *m) {
+    m->handle = _z_espidf_mutex_new(false);
+    return m->handle == NULL ? _Z_ERR_SYSTEM_OUT_OF_MEMORY : _Z_RES_OK;
+}
+
+z_result_t _z_mutex_drop(_z_mutex_t *m) {
+    _z_espidf_sem_delete(&m->handle);
+    return _Z_RES_OK;
+}
+
+z_result_t _z_mutex_lock(_z_mutex_t *m) {
+    _Z_ESPIDF_CHECK_HANDLE(m->handle);
+    return xSemaphoreTake(m->handle, portMAX_DELAY) == pdTRUE ? _Z_RES_OK : _Z_ERR_SYSTEM_GENERIC;
+}
+
+/* Busy is an answer, not a fault: no error is reported for it. */
+z_result_t _z_mutex_try_lock(_z_mutex_t *m) {
+    _Z_ESPIDF_CHECK_HANDLE(m->handle);
+    return xSemaphoreTake(m->handle, 0) == pdTRUE ? _Z_RES_OK : _Z_ERR_SYSTEM_GENERIC;
+}
+
+z_result_t _z_mutex_unlock(_z_mutex_t *m) {
+    _Z_ESPIDF_CHECK_HANDLE(m->handle);
+    return xSemaphoreGive(m->handle) == pdTRUE ? _Z_RES_OK : _Z_ERR_SYSTEM_GENERIC;
+}
 
 z_result_t _z_mutex_rec_init(_z_mutex_rec_t *m) {
-    pthread_mutexattr_t attr;
-    _Z_RETURN_IF_SYS_ERR(pthread_mutexattr_init(&attr));
-    _Z_RETURN_IF_SYS_ERR(pthread_mutexattr_settype(&attr, PTHREAD_MUTEX_RECURSIVE));
-    _Z_RETURN_IF_SYS_ERR(pthread_mutex_init(m, &attr));
-    _Z_CHECK_SYS_ERR(pthread_mutexattr_destroy(&attr));
+    m->handle = _z_espidf_mutex_new(true);
+    return m->handle == NULL ? _Z_ERR_SYSTEM_OUT_OF_MEMORY : _Z_RES_OK;
 }
 
-z_result_t _z_mutex_rec_drop(_z_mutex_rec_t *m) { _Z_CHECK_SYS_ERR(pthread_mutex_destroy(m)); }
+z_result_t _z_mutex_rec_drop(_z_mutex_rec_t *m) {
+    _z_espidf_sem_delete(&m->handle);
+    return _Z_RES_OK;
+}
 
-z_result_t _z_mutex_rec_lock(_z_mutex_rec_t *m) { _Z_CHECK_SYS_ERR(pthread_mutex_lock(m)); }
+z_result_t _z_mutex_rec_lock(_z_mutex_rec_t *m) {
+    _Z_ESPIDF_CHECK_HANDLE(m->handle);
+    return xSemaphoreTakeRecursive(m->handle, portMAX_DELAY) == pdTRUE ? _Z_RES_OK : _Z_ERR_SYSTEM_GENERIC;
+}
 
-z_result_t _z_mutex_rec_try_lock(_z_mutex_rec_t *m) { _Z_CHECK_SYS_ERR(pthread_mutex_trylock(m)); }
+z_result_t _z_mutex_rec_try_lock(_z_mutex_rec_t *m) {
+    _Z_ESPIDF_CHECK_HANDLE(m->handle);
+    return xSemaphoreTakeRecursive(m->handle, 0) == pdTRUE ? _Z_RES_OK : _Z_ERR_SYSTEM_GENERIC;
+}
 
-z_result_t _z_mutex_rec_unlock(_z_mutex_rec_t *m) { _Z_CHECK_SYS_ERR(pthread_mutex_unlock(m)); }
+z_result_t _z_mutex_rec_unlock(_z_mutex_rec_t *m) {
+    _Z_ESPIDF_CHECK_HANDLE(m->handle);
+    return xSemaphoreGiveRecursive(m->handle) == pdTRUE ? _Z_RES_OK : _Z_ERR_SYSTEM_GENERIC;
+}
 
 /*------------------ Condvar ------------------*/
+/*
+ * A counter of waiters under its own lock, and a counting semaphore with one count per
+ * waiter woken. A signal between a waiter's unlock and its take is kept by the semaphore,
+ * so no wakeup is lost there. A timed wait that times out takes the lock and then any count
+ * already given: if one is there, a signal raced the timeout and already took this waiter
+ * off the count, so the wait reports the wakeup instead of decrementing a second time --
+ * which would leave the count one short and a later waiter unwoken.
+ */
 z_result_t _z_condvar_init(_z_condvar_t *cv) {
-    // ESP-IDF silently ignores pthread_condattr_setclock(CLOCK_MONOTONIC):
-    // the call succeeds but the condvar still uses CLOCK_REALTIME internally.
-    // Passing NULL keeps the behaviour explicit.  The MONOTONIC-to-REALTIME
-    // conversion is handled in _z_condvar_wait_until instead.
-    _Z_CHECK_SYS_ERR(pthread_cond_init(cv, NULL));
+    cv->waiters = 0;
+    cv->lock = _z_espidf_mutex_new(false);
+    cv->sem = _z_espidf_counting_new();
+    if (cv->lock == NULL || cv->sem == NULL) {
+        _z_espidf_sem_delete(&cv->lock);
+        _z_espidf_sem_delete(&cv->sem);
+        return _Z_ERR_SYSTEM_OUT_OF_MEMORY;
+    }
+    return _Z_RES_OK;
 }
 
-z_result_t _z_condvar_drop(_z_condvar_t *cv) { _Z_CHECK_SYS_ERR(pthread_cond_destroy(cv)); }
+z_result_t _z_condvar_drop(_z_condvar_t *cv) {
+    _z_espidf_sem_delete(&cv->sem);
+    _z_espidf_sem_delete(&cv->lock);
+    return _Z_RES_OK;
+}
 
-z_result_t _z_condvar_signal(_z_condvar_t *cv) { _Z_CHECK_SYS_ERR(pthread_cond_signal(cv)); }
+z_result_t _z_condvar_signal(_z_condvar_t *cv) {
+    _Z_ESPIDF_CHECK_HANDLE(cv->lock);
+    xSemaphoreTake(cv->lock, portMAX_DELAY);
+    if (cv->waiters > 0) {
+        cv->waiters--;
+        xSemaphoreGive(cv->sem);
+    }
+    xSemaphoreGive(cv->lock);
+    return _Z_RES_OK;
+}
 
-z_result_t _z_condvar_signal_all(_z_condvar_t *cv) { _Z_CHECK_SYS_ERR(pthread_cond_broadcast(cv)); }
+z_result_t _z_condvar_signal_all(_z_condvar_t *cv) {
+    _Z_ESPIDF_CHECK_HANDLE(cv->lock);
+    xSemaphoreTake(cv->lock, portMAX_DELAY);
+    while (cv->waiters > 0) {
+        cv->waiters--;
+        xSemaphoreGive(cv->sem);
+    }
+    xSemaphoreGive(cv->lock);
+    return _Z_RES_OK;
+}
 
-z_result_t _z_condvar_wait(_z_condvar_t *cv, _z_mutex_t *m) { _Z_CHECK_SYS_ERR(pthread_cond_wait(cv, m)); }
+static z_result_t _z_espidf_condvar_wait_ticks(_z_condvar_t *cv, _z_mutex_t *m, TickType_t ticks) {
+    _Z_ESPIDF_CHECK_HANDLE(cv->lock);
+    _Z_ESPIDF_CHECK_HANDLE(m->handle);
+    xSemaphoreTake(cv->lock, portMAX_DELAY);
+    cv->waiters++;
+    xSemaphoreGive(cv->lock);
 
+    _z_mutex_unlock(m);
+    z_result_t ret = _Z_RES_OK;
+    if (xSemaphoreTake(cv->sem, ticks) != pdTRUE) {
+        xSemaphoreTake(cv->lock, portMAX_DELAY);
+        if (xSemaphoreTake(cv->sem, 0) != pdTRUE) {
+            cv->waiters--;
+            ret = Z_ETIMEDOUT;
+        }
+        xSemaphoreGive(cv->lock);
+    }
+    _z_mutex_lock(m);
+    return ret;
+}
+
+z_result_t _z_condvar_wait(_z_condvar_t *cv, _z_mutex_t *m) {
+    return _z_espidf_condvar_wait_ticks(cv, m, portMAX_DELAY);
+}
+
+/* abstime is CLOCK_MONOTONIC, the clock z_clock_now() reads. */
 z_result_t _z_condvar_wait_until(_z_condvar_t *cv, _z_mutex_t *m, const z_clock_t *abstime) {
-    // abstime is CLOCK_MONOTONIC (from z_clock_now()), but ESP-IDF condvars
-    // always use CLOCK_REALTIME.  Convert the remaining monotonic duration to
-    // an equivalent REALTIME deadline before calling pthread_cond_timedwait.
-    struct timespec mono_now;
-    clock_gettime(CLOCK_MONOTONIC, &mono_now);
-
-    int64_t remaining_ns =
-        ((int64_t)abstime->tv_sec - mono_now.tv_sec) * 1000000000LL + ((int64_t)abstime->tv_nsec - mono_now.tv_nsec);
-    if (remaining_ns <= 0) {
+    struct timespec now;
+    clock_gettime(CLOCK_MONOTONIC, &now);
+    int64_t remaining_us =
+        ((int64_t)abstime->tv_sec - now.tv_sec) * 1000000LL + ((int64_t)abstime->tv_nsec - now.tv_nsec) / 1000LL;
+    if (remaining_us <= 0) {
         return Z_ETIMEDOUT;
     }
-
-    struct timespec real_now;
-    clock_gettime(CLOCK_REALTIME, &real_now);
-
-    struct timespec deadline = {
-        .tv_sec = real_now.tv_sec + (time_t)(remaining_ns / 1000000000LL),
-        .tv_nsec = real_now.tv_nsec + (long)(remaining_ns % 1000000000LL),
-    };
-    if (deadline.tv_nsec >= 1000000000L) {
-        deadline.tv_sec++;
-        deadline.tv_nsec -= 1000000000L;
+    /* Rounded up, so a wait never ends before its deadline. */
+    const int64_t tick_us = 1000LL * portTICK_PERIOD_MS;
+    int64_t ticks = (remaining_us + tick_us - 1) / tick_us;
+    if (ticks >= (int64_t)portMAX_DELAY) {
+        ticks = (int64_t)portMAX_DELAY - 1;
     }
-
-    int error = pthread_cond_timedwait(cv, m, &deadline);
-    if (error == ETIMEDOUT) {
-        return Z_ETIMEDOUT;
-    }
-    _Z_CHECK_SYS_ERR(error);
+    return _z_espidf_condvar_wait_ticks(cv, m, (TickType_t)ticks);
 }
 #endif  // Z_FEATURE_MULTI_THREAD == 1
 

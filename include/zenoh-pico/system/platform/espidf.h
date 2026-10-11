@@ -18,6 +18,7 @@
 #include <driver/uart.h>
 #include <freertos/FreeRTOS.h>
 #include <freertos/event_groups.h>
+#include <freertos/semphr.h>
 #include <freertos/task.h>
 
 #include "zenoh-pico/config.h"
@@ -43,9 +44,26 @@ typedef struct {
     TaskHandle_t handle;
     EventGroupHandle_t join_event;
 } _z_task_t;
-typedef pthread_mutex_t _z_mutex_t;
-typedef pthread_mutex_t _z_mutex_rec_t;
-typedef pthread_cond_t _z_condvar_t;
+/*
+ * FreeRTOS semaphores rather than pthreads, so that the objects can be allocated where the
+ * application says: Z_ESPIDF_SYNC_CAPS, PSRAM by default when the board has it. ESP-IDF's
+ * pthread_mutex_init() always takes its FreeRTOS mutex from the internal heap, and a
+ * micro-ROS session over rmw_zenoh_pico makes ~150 of them -- ~15 KB of internal DRAM on
+ * a board where that is the scarce pool. No ISR touches these, and no task uses them while
+ * a flash operation has the cache off (the other core is stalled, this one has the
+ * scheduler suspended), which are the two conditions IDF puts on PSRAM-resident objects.
+ */
+typedef struct {
+    SemaphoreHandle_t handle;
+} _z_mutex_t;
+typedef struct {
+    SemaphoreHandle_t handle;
+} _z_mutex_rec_t;
+typedef struct {
+    SemaphoreHandle_t lock;  // guards `waiters`
+    SemaphoreHandle_t sem;   // one count per waiter woken
+    int waiters;
+} _z_condvar_t;
 typedef TaskHandle_t _z_task_id_t;
 #endif  // Z_FEATURE_MULTI_THREAD == 1
 
